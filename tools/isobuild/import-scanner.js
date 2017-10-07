@@ -438,6 +438,8 @@ export default class ImportScanner {
 
       Object.keys(missingModules).forEach(id => {
         if (! has(newlyMissing, id)) {
+          // We don't need to use ImportScanner.mergeMissing here because
+          // this is the first time newlyAdded[id] has been assigned.
           newlyAdded[id] = missingModules[id];
         }
       });
@@ -463,6 +465,10 @@ export default class ImportScanner {
     };
   }
 
+  // Helper for copying the properties of source into target,
+  // concatenating values (which must be arrays) if a property already
+  // exists. The array elements should be importInfo objects, and will be
+  // deduplicated according to their .parentPath properties.
   static mergeMissing(target, source) {
     keys(source).forEach(id => {
       const importInfoList = source[id];
@@ -471,18 +477,24 @@ export default class ImportScanner {
       if (! has(target, id)) {
         target[id] = [];
       } else {
-        target[id].forEach((info, index) => {
-          pathToIndex[info.parentPath] = index;
+        target[id].forEach((importInfo, index) => {
+          pathToIndex[importInfo.parentPath] = index;
         });
       }
 
-      importInfoList.forEach(info => {
-        const index = pathToIndex[info.parentPath];
-        if (typeof index === "number") {
-          target[id][index] = info;
-        } else {
-          target[id].push(info);
+      importInfoList.forEach(importInfo => {
+        const { parentPath } = importInfo;
+        if (typeof parentPath === "string") {
+          const index = pathToIndex[parentPath];
+          if (typeof index === "number") {
+            // If an importInfo object with this .parentPath is already
+            // present in the target[id] array, replace it.
+            target[id][index] = importInfo;
+            return;
+          }
         }
+
+        target[id].push(importInfo);
       });
     });
   }
@@ -655,45 +667,10 @@ export default class ImportScanner {
           }
         }
 
-        // Avoid scanning files that we've scanned before, but mark them
-        // as imported so we know to include them in the bundle if they
-        // are lazy. Eager files and files that we have imported before do
-        // not need to be scanned again. Lazy files that we have not
-        // imported before still need to be scanned, however. Note that
-        // alreadyScanned will be "dynamic" (which is truthy) if the file
-        // has only been scanned because of a dynamic import(...).
-        const alreadyScanned = ! depFile.lazy || depFile.imported;
-
-        // Whether the file is eager or lazy, mark it as imported. For
-        // lazy files, this makes the difference between being included in
-        // or omitted from the bundle. For eager files, this just ensures
-        // we won't scan them again. If this scan began from a dynamic
-        // import(...), we set depFile.imported = "dynamic" unless it's
-        // already been set true.
-        depFile.imported = dynamic
-          ? depFile.imported || "dynamic"
-          : true;
-
-        const needsToBeScanned = ! alreadyScanned ||
-          // If the file has already been scanned, but only because of a
-          // dynamic import(...), then it needs to be scanned again, so that
-          // we mark it and its dependencies as non-dynamic. This will be
-          // cheaper than before because we've already computed depFile.deps.
-          (alreadyScanned === "dynamic" &&
-           depFile.imported === true);
-
-        if (needsToBeScanned) {
-          if (depFile.error) {
-            // Since this file is lazy, it might never have been imported,
-            // so any errors reported to InputFile#error were saved but
-            // not reported at compilation time. Now that we know the file
-            // has been imported, it's time to report those errors.
-            buildmessage.error(depFile.error.message,
-                               depFile.error.info);
-          } else {
-            this._scanFile(depFile, dynamic);
-          }
-        }
+        // If depFile has already been scanned, this._scanFile will return
+        // immediately thanks to the depFile.imported-checking logic at
+        // the top of the method.
+        this._scanFile(depFile, dynamic);
 
         return;
       }
@@ -719,7 +696,10 @@ export default class ImportScanner {
       depFile.absModuleId = absModuleId;
       depFile.servePath = stripLeadingSlash(absModuleId);
       depFile.lazy = true;
-      depFile.imported = dynamic ? "dynamic" : true;
+      // Setting depFile.imported = false is necessary so that
+      // this._scanFile(depFile, dynamic) doesn't think the file has been
+      // scanned already and return immediately.
+      depFile.imported = false;
 
       // Append this file to the output array and record its index.
       this._addFile(absImportedPath, depFile);
